@@ -52,51 +52,6 @@ public class Application {
 
 	public static final int ZK_SERVER_PORT = 3121;
 
-	public static final String EXCHANGE_NAME = "fsm-exchange";
-
-	public static final String QUEUE_NAME = "queue-name"; // todo: this is a hack
-
-	@Autowired
-	private ConnectionFactory connectionFactory;
-
-//	@Bean
-//	public AmqpAdmin amqpAdmin() {
-//		RabbitAdmin admin = new RabbitAdmin(connectionFactory);
-//		admin.declareExchange(new TopicExchange(EXCHANGE_NAME, false, false));
-//		return admin;
-//	}
-
-	@Bean
-	Queue queue() {
-		return new Queue(QUEUE_NAME, false);
-	}
-
-	@Bean
-	public RabbitTemplate rabbitTemplate() {
-		RabbitTemplate rabbitTemplate = new RabbitTemplate(connectionFactory);
-		rabbitTemplate.setExchange(EXCHANGE_NAME);
-		return rabbitTemplate;
-	}
-
-	@Bean
-	TopicExchange exchange() {
-		return new TopicExchange(EXCHANGE_NAME, false, false);
-	}
-
-	@Bean
-	Binding binding() {
-		return BindingBuilder.bind(queue()).to(exchange()).with("key-hack");
-	}
-
-	@Bean
-	SimpleMessageListenerContainer container(ConnectionFactory connectionFactory) {
-		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer();
-		container.setConnectionFactory(connectionFactory);
-		container.setQueueNames(QUEUE_NAME);
-		container.setMessageListener(stateMachine());
-		return container;
-	}
-
 	@Bean
 	public TestingServer zkServer() throws Exception {
 		return new TestingServer(ZK_SERVER_PORT);
@@ -117,10 +72,9 @@ public class Application {
 	}
 
 	@Bean
-
 	public StateMachine<Demo.LightSwitch> stateMachine() {
 		// create the state machine, add supported transitions
-		StateMachine<Demo.LightSwitch> stateMachine = new ZKStateMachine<Demo.LightSwitch>(rabbitTemplate(),
+		StateMachine<Demo.LightSwitch> stateMachine = new ZKStateMachine<Demo.LightSwitch>(
 				curatorClient(), "light-switch", Demo.LightSwitch.class, Demo.LightSwitch.OFF);
 
 		stateMachine.addTransitions(new Transitions<Demo.LightSwitch>(Demo.LightSwitch.OFF).addTo(Demo.LightSwitch.ON));

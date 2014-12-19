@@ -16,75 +16,51 @@
 
 package org.springframework.cloud.cluster.fsm;
 
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.framework.api.BackgroundCallback;
-import org.apache.curator.framework.api.CuratorEvent;
 import org.apache.curator.framework.api.CuratorWatcher;
+import org.apache.curator.framework.api.transaction.CuratorTransaction;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.core.MessageBuilder;
-import org.springframework.amqp.core.MessageListener;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.util.Assert;
 
 /**
  * State machine with ZooKeeper as back end.
  *
  * @param <S> enum of states
  */
-public class ZKStateMachine<S extends Enum<S>> implements StateMachine<S>, MessageListener {
+public class ZKStateMachine<S extends Enum<S>> implements StateMachine<S> {
 	private final Logger logger = LoggerFactory.getLogger(this.getClass());
 
-	private final RabbitTemplate rabbitTemplate;
+	private final String id = UUID.randomUUID().toString();
 	private final CuratorFramework client;
 	private final String name;
-	private final String path;
+	private final String statePath;
+	private final String stateLogPath;
 	private final Class<S> stateEnum;
 	private final S initialState;
 	private final Map<S, Transitions<S>> transitions = new ConcurrentHashMap<S, Transitions<S>>();
 	private final List<StateListener<S>> listeners = new CopyOnWriteArrayList<StateListener<S>>();
-	private final BackgroundCallback listenerTrigger = new BackgroundCallback() {
-		@Override
-		public void processResult(CuratorFramework client, CuratorEvent event) throws Exception {
-			switch (event.getType()) {
-				case GET_DATA:
-					assert event.getData() != null;
-					S state = Enum.valueOf(stateEnum, new String(event.getData()));
-					for (StateListener<S> listener : listeners) {
-						listener.onEnter(state);
-					}
-					break;
-				default:
-			}
-		}
-	};
-	private final CuratorWatcher watcher = new CuratorWatcher() {
-		@Override
-		public void process(WatchedEvent event) throws Exception {
-			switch (event.getType()) {
-				case NodeCreated:
-				case NodeDataChanged:
-					client.getData().usingWatcher(this).inBackground(listenerTrigger).forPath(path);
-					break;
-				default:
-					client.checkExists().usingWatcher(this).forPath(path);
-					break;
-			}
-		}
-	};
+	private final AtomicReference<StateWrapper> currentStateRef = new AtomicReference<StateWrapper>();
+	private final CuratorWatcher watcher = new StateWatcher();
 
-	public ZKStateMachine(RabbitTemplate rabbitTemplate, CuratorFramework client, String name, Class<S> stateEnum, S initialState) {
-		this.rabbitTemplate = rabbitTemplate;
+	public ZKStateMachine(CuratorFramework client, String name, Class<S> stateEnum, S initialState) {
 		this.client = client;
 		this.name = name;
-		this.path = '/' + name;
+		this.statePath = '/' + name + "/current";
+		this.stateLogPath = '/' + name + "/log";
 		this.stateEnum = stateEnum;
 		this.initialState = initialState;
 	}
@@ -101,59 +77,31 @@ public class ZKStateMachine<S extends Enum<S>> implements StateMachine<S>, Messa
 		listeners.remove(listener);
 	}
 
-	public S getCurrentState() {
-		try {
-			return Enum.valueOf(stateEnum, new String(client.getData().usingWatcher(watcher).forPath(path)));
-		}
-		catch (Exception e) {
-			throw new RuntimeException(e);
-		}
-	}
-
-	@Override
-	public void transitionTo(final S state) {
-		try {
-			client.getData().usingWatcher(watcher).inBackground(new BackgroundCallback() {
-				@Override
-				public void processResult(CuratorFramework client, CuratorEvent event) throws Exception {
-					// a successful transition will:
-					//   1. read the current state and current version
-					//   2. if the current state allows for a transition,
-					//      issue a CAS operation
-					//   3. if the operation succeeds, an event will be
-					//      raised and any registered StateListeners will
-					//      be notified
-
-					int version = event.getStat().getVersion();
-					S currentState = Enum.valueOf(stateEnum, new String(event.getData()));
-
-					// TODO: if we can't transition, what should we do?
-					if (transitions.get(currentState).to.contains(state)) {
-						client.setData().withVersion(version).forPath(path, state.toString().getBytes());
-						rabbitTemplate.send("key-hack", MessageBuilder.withBody(state.toString().getBytes()).build());
-//						rabbitTemplate.send(MessageBuilder.withBody(state.toString().getBytes()).build());
-					}
-				}
-			}).forPath(path);
-		}
-		catch (Exception e) {
-			throw new RuntimeException(e);
-		}
-	}
-
 	@Override
 	public void start() {
 		try {
-			if (client.checkExists().usingWatcher(watcher).forPath(path) == null) {
-				client.create().inBackground().forPath(path, this.initialState.toString().getBytes());
+			if (client.checkExists().forPath(statePath) == null) {
+				String initialStateString = createStateString(new StateWrapper(initialState, 0));
+				client.inTransaction()
+						.create().forPath("/" + name)
+						.and()
+						.create().forPath(statePath, initialStateString.getBytes())
+						.and()
+						.create().forPath(stateLogPath)
+						.and()
+						.create().forPath(stateLogPath + '/' + initialStateString)
+						.and()
+						.commit();
 			}
-
-
-
+		}
+		catch (KeeperException.NodeExistsException e) {
+			// ignore
 		}
 		catch (Exception e) {
 			throw new RuntimeException(e);
 		}
+
+		currentStateRef.set(readState());
 	}
 
 	@Override
@@ -166,8 +114,126 @@ public class ZKStateMachine<S extends Enum<S>> implements StateMachine<S>, Messa
 		throw new UnsupportedOperationException();
 	}
 
-	@Override
-	public void onMessage(Message message) {
-		logger.info("Message received: {}", message);
+	public S getCurrentState() {
+		return currentStateRef.get().state;
 	}
+
+	private StateWrapper readState()  {
+		return readState(null);
+	}
+
+	private StateWrapper readState(Stat stat)  {
+		try {
+			if (stat == null) {
+				stat = new Stat();
+			}
+			String stateString = new String(client.getData().storingStatIn(stat).usingWatcher(watcher).forPath(statePath));
+			String[] s = stateString.split(":");
+			int stateVersion = Integer.parseInt(s[0]);
+			S state = Enum.valueOf(stateEnum, s[1]);
+			return new StateWrapper(state, stateVersion);
+		}
+		catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+	}
+
+	private String createStateString(StateWrapper stateWrapper) {
+		return String.format(Locale.ENGLISH, "%010d", stateWrapper.version)
+				+ ':' + stateWrapper.state.toString() + ':' + id;
+	}
+
+	@Override
+	public void transitionTo(final S state) {
+		StateWrapper cached = currentStateRef.get();
+		Stat currentStat = new Stat();
+		StateWrapper current = readState(currentStat);
+		if (cached.version == current.version) {
+			if (transitions.get(cached.state).to.contains(state)) {
+				CuratorTransaction tx = client.inTransaction();
+				String stateString = createStateString(new StateWrapper(state, current.version + 1));
+
+				try {
+					tx.create().forPath(stateLogPath + '/' + stateString)
+							.and()
+							.setData().withVersion(currentStat.getVersion()).forPath(statePath, stateString.getBytes())
+							.and()
+							.commit();
+				}
+				catch (Exception e) {
+					// todo: handle CAS failures
+					throw new RuntimeException(e);
+				}
+			}
+			else {
+				// todo: invalid transition
+			}
+		}
+		else {
+			// todo: cache is out of date
+		}
+
+	}
+
+	private class StateWatcher implements CuratorWatcher {
+		@Override
+		public void process(WatchedEvent event) throws Exception {
+			switch (event.getType()) {
+				case NodeDataChanged:
+					StateWrapper currentState = currentStateRef.get();
+					StateWrapper newState = readState();
+					if (currentState.version + 1 == newState.version &&
+							currentStateRef.compareAndSet(currentState, newState)) {
+						for (StateListener<S> listener : listeners) {
+							listener.onEnter(newState.state);
+						}
+					}
+					else {
+						// this means that more than one state transition
+						// happened; we need to read the log and play back
+						// all of the transitions that were missed
+						List<String> logEntries = client.getChildren().forPath(stateLogPath);
+						Collections.sort(logEntries);
+						boolean currentInLog = false;
+						for (String entry : logEntries) {
+							String[] fields = entry.split(":");
+							int version = Integer.parseInt(fields[0]);
+							if (version == currentState.version) {
+								currentInLog = true;
+							}
+							else if (version > currentState.version) {
+								if (currentInLog) {
+									S state = Enum.valueOf(stateEnum, fields[1]);
+									currentStateRef.set(new StateWrapper(state, version));
+									for (StateListener<S> listener : listeners) {
+										listener.onEnter(newState.state);
+									}
+								}
+								else {
+									// TODO: this means that the log is missing
+									// transitions that occurred after the
+									// last known transition...
+								}
+							}
+						}
+					}
+					break;
+				default:
+					client.checkExists().usingWatcher(this).forPath(statePath);
+					break;
+			}
+		}
+	}
+
+	private class StateWrapper {
+		private final S state;
+		private final int version;
+
+		public StateWrapper(S state, int version) {
+			Assert.notNull(state);
+			this.state = state;
+			this.version = version;
+		}
+	}
+
 }
