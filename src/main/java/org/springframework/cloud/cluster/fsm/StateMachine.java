@@ -40,13 +40,6 @@ public interface StateMachine<S extends Enum<S>> {
 	void transitionTo(S state);
 
 	/**
-	 * Add a state transition definition.
-	 *
-	 * @param transitions new state transitions
-	 */
-	void addTransitions(Transitions<S> transitions);
-
-	/**
 	 * Add a state transition listener. This listener
 	 * will be triggered when a state transition occurs,
 	 * whether initiated locally or remotely.

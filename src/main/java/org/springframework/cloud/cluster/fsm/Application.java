@@ -16,6 +16,8 @@
 
 package org.springframework.cloud.cluster.fsm;
 
+import java.util.Arrays;
+
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.ExponentialBackoffRetry;
@@ -73,14 +75,11 @@ public class Application {
 
 	@Bean
 	public StateMachine<Demo.LightSwitch> stateMachine() {
-		// create the state machine, add supported transitions
-		StateMachine<Demo.LightSwitch> stateMachine = new ZKStateMachine<Demo.LightSwitch>(
-				curatorClient(), "light-switch", Demo.LightSwitch.class, Demo.LightSwitch.OFF);
-
-		stateMachine.addTransitions(new Transitions<Demo.LightSwitch>(Demo.LightSwitch.OFF).addTo(Demo.LightSwitch.ON));
-		stateMachine.addTransitions(new Transitions<Demo.LightSwitch>(Demo.LightSwitch.ON).addTo(Demo.LightSwitch.OFF));
-
-		return stateMachine;
+		return new ZKStateMachine<Demo.LightSwitch>(
+				curatorClient(), "light-switch", Demo.LightSwitch.class, Demo.LightSwitch.OFF,
+				Arrays.<Transitions<Demo.LightSwitch>>asList(
+						new Transitions<Demo.LightSwitch>(Demo.LightSwitch.OFF).addTo(Demo.LightSwitch.ON),
+						new Transitions<Demo.LightSwitch>(Demo.LightSwitch.ON).addTo(Demo.LightSwitch.OFF)));
 	}
 
 	@Bean

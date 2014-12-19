@@ -16,6 +16,7 @@
 
 package org.springframework.cloud.cluster.fsm;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -56,17 +57,17 @@ public class ZKStateMachine<S extends Enum<S>> implements StateMachine<S> {
 	private final AtomicReference<StateWrapper> currentStateRef = new AtomicReference<StateWrapper>();
 	private final CuratorWatcher watcher = new StateWatcher();
 
-	public ZKStateMachine(CuratorFramework client, String name, Class<S> stateEnum, S initialState) {
+	public ZKStateMachine(CuratorFramework client, String name, Class<S> stateEnum,
+			S initialState, Collection<Transitions<S>> transitions) {
 		this.client = client;
 		this.name = name;
 		this.statePath = '/' + name + "/current";
 		this.stateLogPath = '/' + name + "/log";
 		this.stateEnum = stateEnum;
 		this.initialState = initialState;
-	}
-
-	public void addTransitions(Transitions<S> newTransitions) {
-		this.transitions.put(newTransitions.getState(), newTransitions);
+		for (Transitions<S> t : transitions) {
+			this.transitions.put(t.getState(), t);
+		}
 	}
 
 	public void addListener(StateListener<S> listener) {
@@ -224,6 +225,7 @@ public class ZKStateMachine<S extends Enum<S>> implements StateMachine<S> {
 			}
 		}
 	}
+
 
 	private class StateWrapper {
 		private final S state;

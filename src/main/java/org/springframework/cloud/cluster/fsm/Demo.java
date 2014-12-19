@@ -42,8 +42,6 @@ public class Demo implements InitializingBean {
 			@Override
 			public void run() {
 				try {
-					Thread.sleep(5000);  //todo: hack -> wait for rabbit to start up
-
 					stateMachine.addListener(new StateListener<Demo.LightSwitch>() {
 						@Override
 						public void onEnter(Demo.LightSwitch state) {
